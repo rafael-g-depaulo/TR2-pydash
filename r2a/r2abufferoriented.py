@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author: Rafael G. de Paulo (github.com/rafael-g-depaulo)
+@author: Lucas Vinícius Magalhães Pinheiro (github.com/LucasVinic)
 
 @description: PyDash Project
 
@@ -31,13 +32,16 @@ class R2ABufferOriented(IR2A):
         self.request_time = 0
         # ammount of segments recieved
         self.recievedSegments = 0
-        # estimated channel throughput
+        # dynamic estimated channel throughput
         self.throughput = 0
+        # buffer size when the last segment was requested
+        self.oldBufferSize = 0
         # algorithm parameters
-        self.bufferTarget = 30
+        self.bufferTarget = 20
+        self.maxBufferDrop = 4
         self.initialMultiplier = 0.75
-        self.decreaseAmmount = 0.75
-        self.increaseAmmount = 1.15
+        self.decreaseAmmount = 0.95
+        self.increaseAmmount = 1.02
 
     def handle_xml_request(self, msg):
         self.request_time = time.perf_counter()
@@ -66,7 +70,6 @@ class R2ABufferOriented(IR2A):
         self.send_up(msg)
 
     def handle_segment_size_request(self, msg):
-        
         print('')
         print('>>>>>>>> chosing segment quality')
         
@@ -75,31 +78,45 @@ class R2ABufferOriented(IR2A):
         # get buffer size
         bufferSize = self.get_buffer_size()
 
-        # if first ever segment
+        print(f'>>>>>>>> current buffer size: {bufferSize}. old buffer size {self.oldBufferSize}')
+
+        # at the start of the video, maintain quality stable until enough segments have been recieved to start judging the buffer length
         if self.recievedSegments == 0:
             print('>>>>>>>> requesting first segment')
             desiredQuality = self.throughput * self.initialMultiplier
+
+        elif self.recievedSegments < self.bufferTarget:
+            desiredQuality = self.throughput
+
+        # if buffer above target and is decreasing rapidly, decrease quality instead of increasing
+        elif (bufferSize >= self.bufferTarget) and (self.oldBufferSize - bufferSize > self.maxBufferDrop):
+            oldQuality = self.throughput
+            decreaseFactor = self.decreaseAmmount ** (self.oldBufferSize - bufferSize)
+            desiredQuality = self.throughput = self.throughput * decreaseFactor
+            print(f'>>>>>> buffer is above target by {bufferSize}, but it went down {self.oldBufferSize - bufferSize} segments since the last segment request. quality decreased from {oldQuality} to {desiredQuality}')
+
         # if buffer is below target, decrease quality
-        # FIXME: this has an issue where the quality always decreases at the start, since
-        #   there can't possibly be enought segments to fill the buffer until some time passes
         elif bufferSize < self.bufferTarget:
             oldQuality = self.throughput
-            decreaseFactor = (self.decreaseAmmount ** (self.bufferTarget - bufferSize))
-            desiredQuality = self.throughput = self.throughput * decreaseFactor
+            decreaseFactor = self.decreaseAmmount ** (self.bufferTarget - bufferSize)
+            desiredQuality = self.throughput = self.throughput  * decreaseFactor
             print(f'>>>>>>>> buffer is below target by ({self.bufferTarget - bufferSize}). decrease desired quality from {oldQuality} to {desiredQuality} (x{decreaseFactor})')
-        # if buffer is above target, increase quality
-        elif bufferSize > self.bufferTarget:
-            oldQuality = self.throughput
-            # increaseFactor = (self.increaseAmmount ** (bufferSize - self.bufferTarget))
-            increaseFactor = self.increaseAmmount
-            desiredQuality = self.throughput = min(self.throughput * increaseFactor, self.qi[-1])
-            print(f'>>>>>>>> buffer is above target by ({bufferSize - self.bufferTarget}). increase desired quality from {oldQuality} to {desiredQuality} (x{increaseFactor})')
+
         # if buffer is at target, keep at current quality
-        else:
+        elif bufferSize == self.bufferTarget:
             desiredQuality = self.throughput
             print(f'>>>>>>>> buffer is stable. keep at current quality')
 
+        # if buffer is above target increase quality
+        elif bufferSize > self.bufferTarget:
+            oldQuality = self.throughput
+            increaseFactor = (self.increaseAmmount ** (bufferSize - self.bufferTarget))
+            # increaseFactor = self.increaseAmmount
+            desiredQuality = self.throughput = max(self.throughput * increaseFactor, self.qi[0])
+            print(f'>>>>>>>> buffer is above target by ({bufferSize - self.bufferTarget}). increase desired quality from {oldQuality} to {desiredQuality} (x{increaseFactor})')
+        
         # select largest quality below target maximum
+        self.oldBufferSize = bufferSize
         selected_qi = self.get_closest_quality(desiredQuality)
         print(f'>>>>>>>> desired quality: {desiredQuality}')
         print(f'>>>>>>>> selected quality: {selected_qi}')
@@ -122,7 +139,7 @@ class R2ABufferOriented(IR2A):
     def get_closest_quality(self, desiredQuality):
         selected_qi = self.qi[0]
         for i in self.qi:
-            if desiredQuality > i:
+            if desiredQuality >= i:
                 selected_qi = i
         return selected_qi
 
